@@ -1,0 +1,28 @@
+# Node.js
+node_modules/
+npm-debug.log
+package-lock.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+env/
+
+# محرر أكواد
+.vscode/
+.idea/
+*.swp
+
+# بيانات حساسة
+.env
+.env.local
+
+# ملفات النظام
+.DS_Store
+Thumbs.db
+
+# Output
+dist/
+build/
