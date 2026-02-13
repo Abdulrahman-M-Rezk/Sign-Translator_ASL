@@ -10,16 +10,14 @@ __pycache__/
 venv/
 env/
 
-# محرر أكواد
 .vscode/
 .idea/
 *.swp
 
-# بيانات حساسة
+.directory
 .env
 .env.local
 
-# ملفات النظام
 .DS_Store
 Thumbs.db
 

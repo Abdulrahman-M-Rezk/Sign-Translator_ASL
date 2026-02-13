@@ -5,17 +5,16 @@ import mediapipe as mp
 import json
 import time
 
-# ================= مسارات الملفات =================
+
 MODEL_PATH = "/mnt/Hub_1/Mix/Projects/Graduation-Project/models/Kaggle_test/model.tflite"
 LABEL_MAP_PATH = "/mnt/Hub_1/Mix/Projects/Graduation-Project/models/Kaggle_test/sign_to_prediction_index_map.json"
 
-# ================= 1. دالة Softmax (لتحويل الأرقام لنسبة مئوية) =================
 def softmax(x):
     """Compute softmax values for each sets of scores in x."""
-    e_x = np.exp(x - np.max(x)) # طرح الماكس لثبات العمليات الحسابية
+    e_x = np.exp(x - np.max(x))
     return e_x / e_x.sum(axis=0)
 
-# ================= 2. تحميل الموديل وتثبيت الحجم =================
+
 print("⏳ Loading resources...")
 try:
     interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
@@ -26,17 +25,15 @@ try:
     input_index = input_details[0]['index']
     output_index = output_details[0]['index']
     
-    # --- الحل الجذري للبطء ---
-    # نحدد الحجم مرة واحدة هنا بالخارج
-    # سنثبت الطول على 30 فريم (وهو كافٍ جداً لمعظم الكلمات)
+    
     FIXED_FRAMES = 30
-    interpreter.resize_tensor_input(input_index, [1, FIXED_FRAMES, 543, 3]) # أضفنا 1 للباتش احتياطاً
-    interpreter.allocate_tensors() # يتم التنفيذ مرة واحدة فقط!
+    interpreter.resize_tensor_input(input_index, [1, FIXED_FRAMES, 543, 3]) 
+    interpreter.allocate_tensors()
     
     print("✅ Model Loaded & Memory Allocated.")
     
 except Exception as e:
-    # محاولة ثانية بدون بعد الباتش [30, 543, 3] لو الموديل رفض الـ [1,...]
+
     try: 
         print("⚠️ Retrying allocation without batch dim...")
         interpreter.resize_tensor_input(input_index, [FIXED_FRAMES, 543, 3])
@@ -46,7 +43,6 @@ except Exception as e:
         print(f"❌ Error loading model: {e2}")
         exit()
 
-# تحميل الأسماء
 try:
     with open(LABEL_MAP_PATH, 'r') as f:
         label_map = json.load(f)
@@ -54,12 +50,12 @@ try:
 except:
     idx_to_sign = None
 
-# ================= 3. إعداد MediaPipe =================
+
 mp_holistic = mp.solutions.holistic
 mp_drawing = mp.solutions.drawing_utils
 
 def extract_landmarks(results):
-    # استخدام NaN للفراغات (ضروري لموديل المركز الأول)
+# there are 543 keypoints in total (468 face + 21 left hand + 33 pose + 21 right hand) nan if not detected instead of 0 to avoid confusion with actual coordinates
     def to_array(landmarks, count):
         if landmarks:
             return [[lm.x, lm.y, lm.z] for lm in landmarks.landmark]
@@ -71,7 +67,7 @@ def extract_landmarks(results):
     rh = to_array(results.right_hand_landmarks, 21)
     return np.concatenate([face, lh, pose, rh])
 
-# ================= 4. الحلقة الرئيسية =================
+# ================= Main loop=================
 cap = cv2.VideoCapture(0)
 sequence = []
 last_prediction = "Waiting..."
@@ -102,18 +98,17 @@ with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=
         # التشغيل فقط عند امتلاء الذاكرة
         if len(sequence) == FIXED_FRAMES:
             try:
-                # تحضير البيانات
+         
                 input_data = np.array(sequence, dtype=np.float32)
                 
-                # إضافة بعد الباتش (Batch Dimension) إذا كان الموديل طلبه في الـ resize فوق
-                # لو الـ input_details shape كان 4 أبعاد، نضيف بعد. لو 3، نتركه.
+          
                 if len(interpreter.get_input_details()[0]['shape']) == 4:
                      input_data = np.expand_dims(input_data, axis=0)
 
-                # الإدخال (بدون resize ولا allocate)
+                # input (without resize or allocate)
                 interpreter.set_tensor(input_index, input_data)
                 
-                # Inference (سريع جداً الآن)
+                # Inference 
                 interpreter.invoke()
                 
                 # استخراج النتيجة
