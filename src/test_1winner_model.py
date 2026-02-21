@@ -4,36 +4,73 @@ import tensorflow as tf
 import mediapipe as mp
 import json
 import time
+from collections import Counter
 
-
+# ================= مسارات الملفات =================
 MODEL_PATH = "/mnt/Hub_1/Mix/Projects/Graduation-Project/models/Kaggle_test/model.tflite"
 LABEL_MAP_PATH = "/mnt/Hub_1/Mix/Projects/Graduation-Project/models/Kaggle_test/sign_to_prediction_index_map.json"
 
+# ================= فئة بناء الجمل والتنعيم (Logic Layer) =================
+class PredictionSystem:
+    def __init__(self, stabilization_frames=5, silence_threshold=2.0):
+        self.history = []
+        self.stabilization_frames = stabilization_frames
+        self.sentence_buffer = [] 
+        self.last_word_time = time.time()
+        self.silence_threshold = silence_threshold
+        self.current_stable_word = None
+        
+    def add_prediction(self, word, confidence):
+        if confidence > 0.4:
+            self.history.append(word)
+            self.history = self.history[-self.stabilization_frames:]
+        else:
+            # إذا كانت الثقة ضعيفة، نعتبرها إشارة فارغة (Noise)
+            self.history.append("")
+            self.history = self.history[-self.stabilization_frames:]
+
+        if len(self.history) == self.stabilization_frames:
+            most_common = Counter(self.history).most_common(1)[0]
+            candidate_word, count = most_common
+            
+            if count >= 3 and candidate_word != "" and candidate_word != self.current_stable_word:
+                self.current_stable_word = candidate_word
+                self.sentence_buffer.append(candidate_word)
+                self.last_word_time = time.time()
+                return candidate_word
+                
+        return None
+
+    def check_sentence_completion(self):
+        if time.time() - self.last_word_time > self.silence_threshold:
+            if self.sentence_buffer:
+                buffer_copy = self.sentence_buffer.copy()
+                self.sentence_buffer = [] 
+                self.history = []
+                self.current_stable_word = None
+                return buffer_copy
+        return None
+
+# ================= الدوال المساعدة =================
 def softmax(x):
-    """Compute softmax values for each sets of scores in x."""
     e_x = np.exp(x - np.max(x))
     return e_x / e_x.sum(axis=0)
 
-
+# ================= تحميل الموديل =================
 print("⏳ Loading resources...")
 try:
     interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
-    
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
-    
     input_index = input_details[0]['index']
     output_index = output_details[0]['index']
-    
     
     FIXED_FRAMES = 30
     interpreter.resize_tensor_input(input_index, [1, FIXED_FRAMES, 543, 3]) 
     interpreter.allocate_tensors()
-    
     print("✅ Model Loaded & Memory Allocated.")
     
 except Exception as e:
-
     try: 
         print("⚠️ Retrying allocation without batch dim...")
         interpreter.resize_tensor_input(input_index, [FIXED_FRAMES, 543, 3])
@@ -50,12 +87,10 @@ try:
 except:
     idx_to_sign = None
 
-
 mp_holistic = mp.solutions.holistic
 mp_drawing = mp.solutions.drawing_utils
 
 def extract_landmarks(results):
-# there are 543 keypoints in total (468 face + 21 left hand + 33 pose + 21 right hand) nan if not detected instead of 0 to avoid confusion with actual coordinates
     def to_array(landmarks, count):
         if landmarks:
             return [[lm.x, lm.y, lm.z] for lm in landmarks.landmark]
@@ -67,11 +102,15 @@ def extract_landmarks(results):
     rh = to_array(results.right_hand_landmarks, 21)
     return np.concatenate([face, lh, pose, rh])
 
-# ================= Main loop=================
+# ================= الحلقة الرئيسية =================
 cap = cv2.VideoCapture(0)
 sequence = []
 last_prediction = "Waiting..."
 prediction_conf = 0.0
+completed_sentence_display = ""
+
+# تهيئة نظام بناء الجمل
+engine = PredictionSystem(stabilization_frames=5, silence_threshold=2.0)
 
 with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
     while cap.isOpened():
@@ -79,74 +118,80 @@ with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=
         if not ret: break
 
         image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # ⏱️ 1. بدء حساب زمن المعالجة (Pipeline Latency)
+        start_time = time.time()
+
         image.flags.writeable = False
         results = holistic.process(image)
         image.flags.writeable = True
         image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
-        # رسم اليدين فقط
         if results.left_hand_landmarks:
             mp_drawing.draw_landmarks(image, results.left_hand_landmarks, mp_holistic.HAND_CONNECTIONS)
         if results.right_hand_landmarks:
             mp_drawing.draw_landmarks(image, results.right_hand_landmarks, mp_holistic.HAND_CONNECTIONS)
 
-        # تجميع البيانات
         keypoints = extract_landmarks(results)
         sequence.append(keypoints)
-        sequence = sequence[-FIXED_FRAMES:] # نحافظ دائماً على آخر 30 فريم
+        sequence = sequence[-FIXED_FRAMES:]
 
-        # التشغيل فقط عند امتلاء الذاكرة
         if len(sequence) == FIXED_FRAMES:
             try:
-         
                 input_data = np.array(sequence, dtype=np.float32)
                 
-          
                 if len(interpreter.get_input_details()[0]['shape']) == 4:
                      input_data = np.expand_dims(input_data, axis=0)
 
-                # input (without resize or allocate)
                 interpreter.set_tensor(input_index, input_data)
-                
-                # Inference 
                 interpreter.invoke()
-                
-                # استخراج النتيجة
                 raw_output = interpreter.get_tensor(output_index)
                 
-                # --- حل مشكلة الـ Indexing ---
-                # لو المخرج [1, 250] -> ناخذ [0] عشان يبقى [250]
-                # لو المخرج [250] -> ناخذه زي ما هو
                 if raw_output.ndim == 2:
                     prediction_logits = raw_output[0]
                 else:
                     prediction_logits = raw_output
 
-                # --- تطبيق الـ Softmax ---
                 probs = softmax(prediction_logits)
-                
                 top_idx = np.argmax(probs)
                 current_conf = probs[top_idx]
                 
-                # فلترة وتحديث
-                if current_conf > 0.4: # نسبة ثقة 40%
-                    word = idx_to_sign[top_idx] if idx_to_sign else str(top_idx)
-                    last_prediction = word
+                word = idx_to_sign[top_idx] if idx_to_sign else str(top_idx)
+                
+                # --- دمج منطق التنعيم وبناء الجمل ---
+                new_word = engine.add_prediction(word, current_conf)
+                if new_word:
+                    last_prediction = new_word
                     prediction_conf = current_conf
-                    color = (0, 255, 0)
-                else:
-                    color = (0, 0, 255)
 
             except Exception as e:
                 print(f"Runtime Error: {e}")
-                sequence = [] # تفريغ في حالة الخطأ
+                sequence = [] 
 
-        # العرض
-        cv2.rectangle(image, (0,0), (640, 60), (0,0,0), -1)
-        cv2.putText(image, f"{last_prediction}", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        cv2.putText(image, f"Conf: {prediction_conf:.1%}", (300, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 1)
+        # فحص اكتمال الجملة
+        completed_sentence = engine.check_sentence_completion()
+        if completed_sentence:
+            completed_sentence_display = " ".join(completed_sentence)
+            print(f"🚀 Ready for LLM: {completed_sentence_display}")
 
-        cv2.imshow('SignSense Pro - Optimized', image)
+        # ⏱️ 2. إيقاف المؤقت (نهاية المعالجة الحسابية)
+        end_time = time.time()
+        pipeline_latency_ms = (end_time - start_time) * 1000
+
+        # ================= العرض على الشاشة =================
+        cv2.rectangle(image, (0,0), (640, 100), (0,0,0), -1)
+        
+        # عرض الكلمة الحالية
+        cv2.putText(image, f"Word: {last_prediction} ({prediction_conf:.1%})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        
+        # عرض الجملة المكتملة
+        cv2.putText(image, f"Sentence: {completed_sentence_display}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        
+        # عرض زمن الوصول بلون ديناميكي لضمان قيد المشروع (200ms)
+        latency_color = (0, 255, 0) if pipeline_latency_ms <= 200 else (0, 0, 255)
+        cv2.putText(image, f"Latency: {pipeline_latency_ms:.1f} ms", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, latency_color, 2)
+
+        cv2.imshow('SignSense Pro - Logic Integrated', image)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
