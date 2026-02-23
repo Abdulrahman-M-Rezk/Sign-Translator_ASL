@@ -22,8 +22,8 @@ class PredictionSystem:
         self.current_stable_word = None
         
     def add_prediction(self, word, confidence):
-        # رفعنا الثقة لـ 0.6 لتقليل الضوضاء
-        if confidence > 0.6:
+        # تم إعادة الثقة إلى 0.4 لحل مشكلة "تأخر التنبؤ"
+        if confidence > 0.4:
             self.history.append(word)
         else:
             self.history.append("")
@@ -42,7 +42,6 @@ class PredictionSystem:
         return None
 
     def force_sentence_completion(self):
-        """دالة تُستدعى يدوياً لتفريغ المخزن وإرساله"""
         if self.sentence_buffer:
             buffer_copy = self.sentence_buffer.copy()
             self.sentence_buffer = [] 
@@ -57,17 +56,15 @@ def softmax(x):
     return e_x / e_x.sum(axis=0)
 
 # ================= LLM Integration (Async via Threading) =================
-final_llm_translation = ""
-_llm_lock = threading.Lock()
-
+final_llm_translation = "Awaiting input..."
 
 def call_llm_api(prompt: str) -> str:
-    """Blocking LLM call (runs in a background thread only)."""
+    """استدعاء الـ API (يعمل في الخلفية فقط)"""
     try:
-        api_key = os.getenv("GROQ_API_KEY")
+        # تأكد من وضع المفتاح في الـ Terminal أو استبدل os.getenv بمفتاحك مباشرة هنا (للتجربة فقط)
+        api_key = os.getenv("GROQ_API_KEY") 
         if not api_key:
-            print("⚠️ GROQ_API_KEY not set; skipping LLM call.")
-            return ""
+            return "Error: GROQ_API_KEY missing."
 
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {
@@ -79,28 +76,31 @@ def call_llm_api(prompt: str) -> str:
             "messages": [
                 {
                     "role": "system",
-                    "content": "You receive raw recognized sign-language words and rewrite them as a natural, polite English sentence.",
+                    "content": "You are a sign language translator. You receive disjointed glosses. Rewrite them into a single, natural, and polite short English sentence. Output ONLY the sentence.",
                 },
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.3,
+            "temperature": 0.2, # تقليل العشوائية لردود مباشرة
         }
 
-        response = requests.post(url, headers=headers, json=data, timeout=15)
+        response = requests.post(url, headers=headers, json=data, timeout=10)
         response.raise_for_status()
         payload = response.json()
-        return payload["choices"][0]["message"]["content"].strip()
+        
+        # تنظيف النص من أي أسطر جديدة لتجنب انهيار OpenCV
+        raw_text = payload["choices"][0]["message"]["content"].strip()
+        clean_text = raw_text.replace('\n', ' ').replace('\r', '')
+        return clean_text
+    
     except Exception as e:
-        print(f"LLM Error: {e}")
-        return ""
-
+        return f"API Error: {str(e)[:30]}"
 
 def _llm_worker(sentence_text: str) -> None:
     global final_llm_translation
+    final_llm_translation = "Thinking..." # إعطاء إشارة مرئية للمستخدم
     llm_result = call_llm_api(sentence_text)
     if llm_result:
-        with _llm_lock:
-            final_llm_translation = llm_result
+        final_llm_translation = llm_result
 
 # ================= تحميل الموديل =================
 print("⏳ Loading resources...")
@@ -118,7 +118,6 @@ try:
     
 except Exception as e:
     try: 
-        print("⚠️ Retrying allocation without batch dim...")
         interpreter.resize_tensor_input(input_index, [FIXED_FRAMES, 543, 3])
         interpreter.allocate_tensors()
         print("✅ Model Loaded (No Batch Dim).")
@@ -133,7 +132,6 @@ try:
 except:
     idx_to_sign = None
 
-# ================= إعداد MediaPipe =================
 mp_holistic = mp.solutions.holistic
 mp_drawing = mp.solutions.drawing_utils
 
@@ -172,15 +170,12 @@ with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=
         image.flags.writeable = True
         image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
-        # تم تعطيل رسم الوجه والجسم للحفاظ على الـ FPS
-        # رسم اليدين فقط
         if results.left_hand_landmarks:
             mp_drawing.draw_landmarks(image, results.left_hand_landmarks, mp_holistic.HAND_CONNECTIONS)
         if results.right_hand_landmarks:
             mp_drawing.draw_landmarks(image, results.right_hand_landmarks, mp_holistic.HAND_CONNECTIONS)
 
-        # تجهيز البيانات وإرسالها للموديل
-        keypoints = extract_landmarks(results)
+        keypoints = extract_landmarks(results) 
         sequence.append(keypoints)
         sequence = sequence[-FIXED_FRAMES:]
 
@@ -211,24 +206,24 @@ with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=
                     prediction_conf = current_conf
 
             except Exception as e:
-                print(f"Runtime Error: {e}")
                 sequence = [] 
 
         end_time = time.time()
         pipeline_latency_ms = (end_time - start_time) * 1000
 
         # ================= العرض على الشاشة =================
-        cv2.rectangle(image, (0,0), (640, 130), (0,0,0), -1)
+        cv2.rectangle(image, (0,0), (640, 150), (0,0,0), -1)
         cv2.putText(image, f"Word: {last_prediction} ({prediction_conf:.1%})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(image, f"Sentence: {completed_sentence_display}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-        with _llm_lock:
-            llm_text = final_llm_translation
-
+        cv2.putText(image, f"Buffer: {completed_sentence_display}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        
         latency_color = (0, 255, 0) if pipeline_latency_ms <= 200 else (0, 0, 255)
         cv2.putText(image, f"Latency: {pipeline_latency_ms:.1f} ms", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, latency_color, 2)
-        cv2.putText(image, f"LLM: {llm_text}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+        
+        # معالجة النصوص الطويلة للـ LLM لتناسب الشاشة
+        display_llm = final_llm_translation[:65] + "..." if len(final_llm_translation) > 65 else final_llm_translation
+        cv2.putText(image, f"Translation: {display_llm}", (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
 
-        cv2.imshow('SignSense Pro - Stable', image)
+        cv2.imshow('SignSense Pro - LLM Integrated', image)
 
         # ================= التقاط الأزرار =================
         key = cv2.waitKey(1) & 0xFF
@@ -237,8 +232,7 @@ with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=
             completed_sentence = engine.force_sentence_completion()
             if completed_sentence:
                 completed_sentence_display = " ".join(completed_sentence)
-                print(f"🚀 [SPACE PRESSED] Ready for LLM: {completed_sentence_display}")
-                # تشغيل خيط منفصل لاستدعاء واجهة الـ LLM بدون حجب الحلقة الرئيسية
+                
                 if _llm_thread is None or not _llm_thread.is_alive():
                     _llm_thread = threading.Thread(
                         target=_llm_worker,
@@ -247,7 +241,6 @@ with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=
                     )
                     _llm_thread.start()
             
-            # منع التقاط حركات اليد أثناء الوصول للكيبورد
             sequence = [] 
                 
         elif key == ord('q'):
