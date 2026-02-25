@@ -1,4 +1,9 @@
 import os
+from dotenv import load_dotenv # السطر الجديد
+
+# تحميل المتغيرات المخفية من ملف .env
+load_dotenv()
+
 os.environ["QT_QPA_PLATFORM"] = "xcb"
 os.environ["DISPLAY"] = os.environ.get("DISPLAY", ":0")
 
@@ -94,18 +99,29 @@ final_llm_translation = "Awaiting input..."
 
 def call_llm_api(prompt):
     try:
+        # الكود الآن سيقرأ المفتاح من ملف .env بأمان
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
-            return "Error: GROQ_API_KEY missing."
+            return "Error: GROQ_API_KEY missing in .env file."
+        
+        # --- البرومبت الهندسي المخصص للغة الإشارة ---
+        system_prompt = (
+            "You are an expert Sign Language translator. "
+            "I will give you a sequence of disjointed sign language words (glosses). "
+            "Your task is to reconstruct them into a single, natural, and grammatically correct English sentence. "
+            "Guess the context if connecting words or pronouns are missing. "
+            "Output ONLY the final sentence, with no conversational filler, no quotes, and no formatting."
+        )
+
         r = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
             json={"model": "llama-3.1-8b-instant",
                   "messages": [
-                      {"role": "system", "content": "Rewrite sign language glosses into one natural English sentence. Output ONLY the sentence without any formatting."},
+                      {"role": "system", "content": system_prompt},
                       {"role": "user",   "content": prompt}],
-                  "temperature": 0.2},
+                  "temperature": 0.3}, # 0.3 تعطي توازن بين الإبداع في تكوين الجملة والالتزام بالكلمات
             timeout=10)
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"].strip().replace('\n', ' ')
